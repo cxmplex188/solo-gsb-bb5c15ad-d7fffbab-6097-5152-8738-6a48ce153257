@@ -19,6 +19,8 @@ from .anonymizer import (
 )
 from .geo import MAX_ZOOM_LIMIT, assign_cells, prepare_points
 from .geo_bounds import count_bounds, prepare_bounds, prepare_cells
+from .hidden_audit import audit_hidden_counts, prepare_table
+from .hidden_audit import prepare_totals as prepare_hidden_totals
 from .intersection import audit_intersections
 from .round_table import prepare_counts, prepare_totals, solve_rounding
 from .spacetime import assign_joint
@@ -57,8 +59,12 @@ app = FastAPI(
         "行列合计照常公开；为防止从合计反推被隐藏格，在其余格中选择数量最少、"
         "行优先坐标序列字典序最小的补充隐藏格，使每个必须隐藏格都位于全部隐藏"
         "格构成的行-列二部图的某个环上。"
+        "另提供隐藏格取值区间审计：接收含 null 隐藏格的 2～4 行、2～4 列"
+        "已发布计数表与公开行列合计，在所有公开格与合计一致且隐藏格为正整数"
+        "的填表方案中，为每个隐藏格求精确最小值与最大值，标记上下界相等、"
+        "可被唯一反推的格。"
     ),
-    version="1.7.0",
+    version="1.8.0",
 )
 
 
@@ -386,6 +392,47 @@ class SuppressCountTableResponse(BaseModel):
     threshold: int
 
 
+class AuditHiddenCountsRequest(BaseModel):
+    """隐藏格取值区间审计请求体（可直接使用 /suppress-count-table 的输出）。"""
+
+    # 已发布计数表：公开格为正整数，隐藏格为 null；2～4 行、2～4 列矩形。
+    table: list[list[Any]] = Field(
+        ..., description="已发布计数表：公开格为正整数，隐藏格为 null"
+    )
+    row_totals: list[Any] = Field(
+        ..., description="公开的行合计：正整数数组，长度等于行数"
+    )
+    column_totals: list[Any] = Field(
+        ..., description="公开的列合计：正整数数组，长度等于列数"
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class HiddenCellRange(BaseModel):
+    """一个隐藏格在所有可行填表方案中的精确取值区间。"""
+
+    # 0 起始的行、列坐标。
+    row: int
+    column: int
+    # 可行填表方案中该格的精确最小值与最大值（均为正整数）。
+    min_value: int
+    max_value: int
+    # 上下界相等时该格取值被行列合计唯一反推。
+    inferable: bool
+
+
+class AuditHiddenCountsResponse(BaseModel):
+    """隐藏格取值区间审计结果。"""
+
+    # 各隐藏格的坐标与区间，按行优先排序。
+    hidden_cells: list[HiddenCellRange]
+    row_totals: list[int]
+    column_totals: list[int]
+    rows: int
+    columns: int
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     """服务信息。"""
@@ -401,6 +448,7 @@ def root() -> dict[str, str]:
         "geo_count_bounds": f"{API_PREFIX}/geo-count-bounds",
         "round_count_table": f"{API_PREFIX}/round-count-table",
         "suppress_count_table": f"{API_PREFIX}/suppress-count-table",
+        "audit_hidden_counts": f"{API_PREFIX}/audit-hidden-counts",
     }
 
 
@@ -710,4 +758,33 @@ def suppress_count_table(
         required_suppressed=[[i, j] for i, j in required],
         secondary_suppressed=[[i, j] for i, j in secondary],
         threshold=request.threshold,
+    )
+
+
+@app.post(
+    f"{API_PREFIX}/audit-hidden-counts",
+    response_model=AuditHiddenCountsResponse,
+)
+def audit_hidden_counts_endpoint(
+    request: AuditHiddenCountsRequest,
+) -> AuditHiddenCountsResponse:
+    """在所有与公开格、行列合计一致的正整数填表方案中求每个隐藏格的区间。"""
+    table = prepare_table(request.table)
+    rows = len(table)
+    cols = len(table[0])
+    row_totals = prepare_hidden_totals(
+        request.row_totals, rows, "row_totals", "行"
+    )
+    column_totals = prepare_hidden_totals(
+        request.column_totals, cols, "column_totals", "列"
+    )
+
+    hidden_cells = audit_hidden_counts(table, row_totals, column_totals)
+
+    return AuditHiddenCountsResponse(
+        hidden_cells=[HiddenCellRange(**cell) for cell in hidden_cells],
+        row_totals=row_totals,
+        column_totals=column_totals,
+        rows=rows,
+        columns=cols,
     )

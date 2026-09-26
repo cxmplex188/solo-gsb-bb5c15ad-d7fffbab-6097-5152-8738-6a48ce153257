@@ -1,0 +1,9 @@
+{
+  "table": [
+    [null, null, 8],
+    [null, null, 6],
+    [9, 5, 12]
+  ],
+  "row_totals": [19, 15, 26],
+  "column_totals": [17, 17, 26]
+}
