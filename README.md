@@ -30,6 +30,11 @@
 行列合计照常公开；为防止由公开合计反推被隐藏格，在其余格中选择
 **数量最少**的补充隐藏格，使每个必须隐藏格都位于全部隐藏格构成的
 行-列二部图的某个环上，同数方案按补充格行优先坐标序列的字典序取最小。
+以及**已发布隐藏计数表的反推审计**：接收一张公开格为正整数、隐藏格为
+`null` 的 2～4 行、2～4 列计数表与公开的行列合计（可直接使用上一接口
+的输出），对每个隐藏格，在所有“公开格与行列合计都吻合、隐藏格均为
+正整数”的填表方案中计算其**精确最小值与最大值**；上下界相等即该格
+可被公开信息唯一反推；不存在任何可行填表方案时返回 422。
 
 服务为纯内存、无状态处理：**原始记录不写日志、不落盘、不挂载数据卷**。
 
@@ -50,6 +55,7 @@ docker compose up --build
 - 公开格区域计数上下界接口：`POST http://localhost:8000/api/v1/geo-count-bounds`
 - 观测计数交叉表受控舍入接口：`POST http://localhost:8000/api/v1/round-count-table`
 - 观测计数表单元格隐藏接口：`POST http://localhost:8000/api/v1/suppress-count-table`
+- 已发布隐藏计数表反推审计接口：`POST http://localhost:8000/api/v1/audit-hidden-counts`
 - 健康检查：`GET http://localhost:8000/api/v1/health`
 - 交互式文档（Swagger UI）：`http://localhost:8000/docs`
 
@@ -872,6 +878,116 @@ curl -s http://localhost:8000/api/v1/suppress-count-table \
   列数不在 2～4 之间、各行长度不一致；
 - 某格计数不是正整数（含 `0`、负数、布尔值、浮点、字符串、`null`）；
 - `threshold` 不是正整数（含 `0`、负数、布尔值、非整数）；
+- 请求体缺少必填字段或出现未声明字段。
+
+## 已发布隐藏计数表反推审计
+
+`POST /api/v1/audit-hidden-counts`，`Content-Type: application/json`。
+
+`/suppress-count-table` 通过补充隐藏保证每个必须隐藏格都位于隐藏格
+二部图的某个环上，但“位于环上”只是定性结论：攻击者仍可能借助公开格与
+行列合计把某个隐藏格的取值缩小到很窄的范围，甚至在环退化或边际合计
+受限时把它**唯一反推**。本接口对一张**已发布**的计数表做事后定量审计：
+
+- 输入一张 2～4 行、2～4 列的计数表：**公开格为正整数、隐藏格为
+  `null`**，外加公开的行合计与列合计——可直接使用
+  `/suppress-count-table` 响应中的 `table`、`row_totals`、
+  `column_totals`；
+- 把每个隐藏格视为未知的正整数 x_ij，每行/列扣除公开格后的残量必须
+  恰好由该行/列的隐藏格凑出；
+- 对每个隐藏格，在**所有**可行的正整数填表方案中求其取值的**精确
+  最小值与最大值**（服务用带下界的运输可行流配合二分查找求解，判定
+  复杂度只与表格结构有关，与计数取值大小无关，因此计数高达 10¹² 也
+  同样瞬时给出精确结果）；
+- 最小值等于最大值的格标记 `"inferable": true`，表示它的真实值已被
+  公开信息唯一确定。
+- 不存在**任何**可行填表方案（如隐藏格为正整数却无法同时满足行列
+  合计）时返回 422。
+
+### 请求格式
+
+```json
+{
+  "table": [
+    [null, null, 8],
+    [null, null, 6],
+    [9, 5, 12]
+  ],
+  "row_totals": [19, 15, 26],
+  "column_totals": [17, 17, 26]
+}
+```
+
+- `table`：已发布计数表，**2～4 行、2～4 列**且各行等长；公开格必须
+  是正整数（不接受 `0`、负数、布尔值、浮点或字符串），隐藏格必须是
+  `null`。允许整张表没有隐藏格。
+- `row_totals`：公开的行合计，**正整数**数组，长度等于行数。
+- `column_totals`：公开的列合计，**正整数**数组，长度等于列数。
+
+### 响应格式
+
+上例即 `/suppress-count-table` 示例请求的发布结果：4 个隐藏格构成一个
+4-环。令 `t` 为 `(0,0)` 的取值，则 `t ∈ [1, 7]`，其余三个隐藏格随 `t`
+线性确定，因此没有格可被唯一反推：
+
+```json
+{
+  "hidden_cells": [
+    {"row": 0, "column": 0, "min_count": 1, "max_count": 7, "inferable": false},
+    {"row": 0, "column": 1, "min_count": 4, "max_count": 10, "inferable": false},
+    {"row": 1, "column": 0, "min_count": 1, "max_count": 7, "inferable": false},
+    {"row": 1, "column": 1, "min_count": 2, "max_count": 8, "inferable": false}
+  ],
+  "row_totals": [19, 15, 26],
+  "column_totals": [17, 17, 26],
+  "total_hidden": 4
+}
+```
+
+- `hidden_cells`：每个隐藏格一项，**按行优先**（先行号后列号，均为
+  **0 起始**）排列；表中没有隐藏格时为**空列表 `[]`**。
+  - `row` / `column`：隐藏格的行、列坐标（0 起始）；
+  - `min_count` / `max_count`：所有可行填表方案中该格取值的精确
+    最小值 / 最大值，均为正整数，恒有 `min_count <= max_count`；
+  - `inferable`：`min_count == max_count` 时为 `true`，该格可由公开
+    信息唯一反推。
+- `row_totals` / `column_totals`：回显请求中的公开合计。
+- `total_hidden`：隐藏格（`null` 格）总数。
+
+边界行为：
+
+- 2×2 表只有 1 个公开格时，剩余 3 个隐藏格构成无环的悬挂结构，逐行
+  逐列相减即可全部唯一确定，三项均为 `inferable: true`；
+- 行列合计把每个隐藏格都逼成 1（如 2×2 全隐藏、行列合计均为 2）时，
+  所有隐藏格同样可反推；
+- 公开格之和已经超过某条公开合计、或两侧总和不一致时返回 422；
+- 没有隐藏格时，只要公开格之和与公开合计完全一致即返回空列表，
+  否则返回 422。
+
+仓库内 `examples/request-audit-hidden-counts.json` 为可直接使用的
+示例（内容即上例，可与 `/suppress-count-table` 的输出对照）：
+
+```bash
+curl -s http://localhost:8000/api/v1/audit-hidden-counts \
+  -H 'Content-Type: application/json' \
+  --data @examples/request-audit-hidden-counts.json
+```
+
+### 隐藏计数审计接口的 422 校验
+
+以下情况返回 HTTP `422 Unprocessable Entity`（请求体结构错误同样为
+422），错误说明在响应体 `detail` 中：
+
+- `table` 为空、不是数组、行数不在 2～4 之间，或某一行不是数组、
+  列数不在 2～4 之间、各行长度不一致；
+- 公开格不是正整数（含 `0`、负数、布尔值、浮点、字符串），或隐藏格
+  写成了 `null` 以外的非法值；
+- `row_totals` / `column_totals` 不是数组、长度与行数/列数不一致，
+  或某项不是正整数；
+- `row_totals` 与 `column_totals` 的总和不相等，或某行/列的公开格
+  之和超过了对应公开合计；
+- 不存在可行填表方案：无法用各隐藏格的正整数同时满足公开格与全部
+  行列合计；
 - 请求体缺少必填字段或出现未声明字段。
 
 ## 422 校验错误
